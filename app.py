@@ -1,6 +1,7 @@
 # ============================================================
 #  CHATBOT EMOCIONAL TERAPÉUTICO + REPORTE PROFESIONAL
 #  Versión mejorada con respuestas dinámicas de Gemini (TCC/DBT/ACT)
+#  Adaptado para despliegue web (Streamlit Community Cloud)
 # ============================================================
 
 import os
@@ -14,8 +15,6 @@ import streamlit as st
 import pandas as pd
 
 # NLP
-import nltk
-# import spacy -> No se estaba usando en las reglas, se elimina para acelerar la carga
 from transformers import pipeline
 
 st.set_page_config(page_title="Chatbot Emocional", layout="centered")
@@ -23,10 +22,10 @@ st.set_page_config(page_title="Chatbot Emocional", layout="centered")
 # ---------------------------
 # Config / paths
 # ---------------------------
-HISTORIAL_FILE = "historial_emocional.json"
+# HISTORIAL_FILE = "historial_emocional.json" # Deshabilitado para despliegue web
 
 # Configuración de la API de Gemini
-# ¡SECURE! Leemos la clave de una variable de entorno, no la pegamos aquí.
+# ¡SECURE! Leemos la clave de los "Secrets" de Streamlit (variable de entorno)
 API_KEY = os.environ.get("GEMINI_API_KEY") 
 API_URL_BASE = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent"
 MAX_RETRIES = 3 # Máximo de reintentos para el retroceso exponencial
@@ -34,20 +33,6 @@ MAX_RETRIES = 3 # Máximo de reintentos para el retroceso exponencial
 # ---------------------------
 # Recursos (descargas)
 # ---------------------------
-nltk.download("punkt", quiet=True)
-nltk.download("stopwords", quiet=True)
-
-# spaCy Spanish model
-@st.cache_resource
-def load_spacy():
-    try:
-        return spacy.load("es_core_news_sm")
-    except Exception:
-        import subprocess
-        subprocess.run(["python", "-m", "spacy", "download", "es_core_news_sm"], check=True)
-        return spacy.load("es_core_news_sm")
-
-# nlp = load_spacy() -> Eliminado
 
 # Transformers sentiment pipeline
 @st.cache_resource
@@ -91,6 +76,7 @@ def gemini_generate_response(system_prompt: str, chat_history: list, user_query:
             # Primero, verificar si la API_KEY existe
             if not API_KEY:
                 print("Error: La variable de entorno GEMINI_API_KEY no está configurada.")
+                st.error("Error de configuración del servidor: La clave de API no fue encontrada. Por favor, contacta al administrador.")
                 return "Error de configuración: La clave de API no fue encontrada. Por favor, contacta al administrador."
 
             response = requests.post(f"{API_URL_BASE}?key={API_KEY}", 
@@ -116,6 +102,7 @@ def gemini_generate_response(system_prompt: str, chat_history: list, user_query:
                 time.sleep(wait_time) # Espera antes de reintentar
             else:
                 print(f"Error al conectar con la API de Gemini después de {MAX_RETRIES} intentos. {e}")
+                st.error("Lo siento, no puedo conectarme con el servicio de IA en este momento. Intenta de nuevo más tarde.")
                 return "Lo siento, estoy teniendo problemas para conectarme en este momento. Validemos lo que sientes. Es normal sentirse así. Por favor, intenta enviarme un mensaje de nuevo en un momento."
         except Exception as e:
             print(f"Error inesperado al procesar la respuesta de la API: {e}")
@@ -126,10 +113,11 @@ def gemini_generate_response(system_prompt: str, chat_history: list, user_query:
 # Utilidades: historial
 # ---------------------------
 def cargar_historial():
-    if not os.path.exists(HISTORIAL_FILE):
-        return []
-    with open(HISTORIAL_FILE, "r", encoding="utf-8") as f:
-        return json.load(f)
+    # En un servidor web, no podemos guardar archivos locales fácilmente.
+    # Mantenemos el historial solo en la sesión.
+    if "historial_db" not in st.session_state:
+        st.session_state.historial_db = []
+    return st.session_state.historial_db
 
 def guardar_en_historial(estado, texto):
     historial = cargar_historial()
@@ -139,8 +127,7 @@ def guardar_en_historial(estado, texto):
         "texto": texto
     }
     historial.append(entry)
-    with open(HISTORIAL_FILE, "w", encoding="utf-8") as f:
-        json.dump(historial, f, ensure_ascii=False, indent=2)
+    st.session_state.historial_db = historial
 
 # ---------------------------
 # Clasificación / reglas terapéuticas
@@ -149,7 +136,7 @@ def clasificar_emocion(texto: str) -> str:
     try:
         result = sentiment_pipe(texto)[0]
         label = result["label"]
-        # Este modelo (nlptown) SÍ usa estrellas, así que esta lógica es correcta
+        # Modelo 'nlptown' usa estrellas
         if label in ["4 stars", "5 stars"]:
             return "positivo"
         elif label in ["3 stars"]:
@@ -157,6 +144,7 @@ def clasificar_emocion(texto: str) -> str:
         else: # 1 star, 2 stars
             return "negativo"
     except Exception:
+        # Fallback simple
         txt = texto.lower()
         if any(w in txt for w in ["feliz", "contento", "bien", "optimista"]):
             return "positivo"
@@ -262,6 +250,8 @@ def aplicar_reglas(texto: str, emocion_detectada: str, chat_history: list):
 # Seguimiento semanal
 # ---------------------------
 def filtrar_semana(historial):
+    if not historial:
+        return []
     hoy = datetime.datetime.now()
     semana = hoy - datetime.timedelta(days=7)
     return [h for h in historial if datetime.datetime.fromisoformat(h["fecha"]) >= semana]
@@ -297,7 +287,13 @@ def generar_reporte_profesional(historial_semana, estadisticas):
 
     df = pd.DataFrame(historial_semana)
     estados_frec = estadisticas["conteos"]
-    principal = max(estados_frec, key=estados_frec.get)
+    
+    if not estados_frec:
+        principal = "N/A"
+        estados_frec = {"N/A": 0}
+    else:
+        principal = max(estados_frec, key=estados_frec.get)
+
 
     riesgo = df[df["estado"] == "riesgo alto"]
     hubo_riesgo = len(riesgo) > 0
@@ -313,7 +309,7 @@ Total de interacciones:
   - {estadisticas['total_interacciones']}
 
 Intervención predominante de la semana:
-  - {principal.upper()} ({estados_frec[principal]} apariciones)
+  - {principal.upper()} ({estados_frec.get(principal, 0)} apariciones)
 
 Distribución de intervenciones:
   {estados_frec}
@@ -388,30 +384,32 @@ with col2:
     else:
         st.info("Aún no hay interacciones.")
 
+    # El botón de borrar historial solo limpia la sesión en la versión web
     if st.button("Borrar historial"):
-        if os.path.exists(HISTORIAL_FILE):
-            os.remove(HISTORIAL_FILE)
-        # Limpiar también el historial de sesión
         st.session_state.messages = []
+        st.session_state.historial_db = []
         st.rerun()
 
     st.markdown("---")
     st.subheader("Seguimiento semanal")
 
     historial_semana = filtrar_semana(historial)
-    estadisticas = generar_estadisticas_semana(historial_semana)
-
-    if estadisticas:
-        st.write("**Interacciones esta semana:**", estadisticas["total_interacciones"])
-        st.write("**Tendencia emocional:**", estadisticas["tendencia"])
-        
-        # Renombrar 'conteo' para el gráfico
-        df_conteos = pd.DataFrame(estadisticas["conteos"].items(), columns=["Intervención", "Conteo"])
-        df_conteos = df_conteos.set_index("Intervención")
-        st.bar_chart(df_conteos)
-
-        st.subheader("Reporte para profesionales")
-        reporte = generar_reporte_profesional(historial_semana, estadisticas)
-        st.text(reporte)
-    else:
+    
+    if not historial_semana:
         st.info("Aún no hay suficientes datos esta semana.")
+    else:
+        estadisticas = generar_estadisticas_semana(historial_semana)
+        if estadisticas:
+            st.write("**Interacciones esta semana:**", estadisticas["total_interacciones"])
+            st.write("**Tendencia emocional:**", estadisticas["tendencia"])
+            
+            # Renombrar 'conteo' para el gráfico
+            df_conteos = pd.DataFrame(estadisticas["conteos"].items(), columns=["Intervención", "Conteo"])
+            df_conteos = df_conteos.set_index("Intervención")
+            st.bar_chart(df_conteos)
+
+            st.subheader("Reporte para profesionales")
+            reporte = generar_reporte_profesional(historial_semana, estadisticas)
+            st.text(reporte)
+        else:
+            st.info("Aún no hay suficientes datos esta semana para generar estadísticas.")
